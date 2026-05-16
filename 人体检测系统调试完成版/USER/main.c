@@ -12,28 +12,28 @@
 
 /*******************************************************************
  * 全局变量说明
- * system_state: 系统状态
+ * system_state：系统状态
  *      0 = 正常运行模式
  *      1 = 参数设置模式
- *      2 = 睡眠模式
- * work_mode: 工作模式
+ *      2 = 关机模式
+ * work_mode：工作模式
  *      0 = 本地模式
  *      1 = 遥控模式
- *      2 = 自动模式(默认)
+ *      2 = 待机模式（开机默认）
  ******************************************************************/
 uint8_t key_num = 0;				// 按键值存储
-uint8_t flag_display = 0;			// 显示菜单页面标志
-uint32_t time_num = 0;				// 时计数器,用于周期采集/上传
-char display_buf[32] = {0};			// OLED 显示缓冲
+uint8_t flag_display = 0;			// 设置菜单页码标记
+uint32_t time_num = 0;				// 计时计数器，用于定时采集/上传
+char display_buf[32] = {0};			// OLED 显示缓存
 
-uint8_t system_state = 0;			// 系统状态:0正常 1设置 2睡眠
-uint8_t work_mode = 2;				// 工作模式:0本地 1遥控 2自动(默认)
+uint8_t system_state = 0;			// 系统状态：0运行 1设置 2关机
+uint8_t work_mode = 2;				// 工作模式：0本地 1遥控 2待机（开机默认）
 
-short temp_value = 0;				// 温度原始数据
+short temp_value = 0;				// 体温原始数据
 uint8_t heart_rate = 75;			// 心率值
 uint8_t spo2 = 98;					// 血氧值
 
-// 报警阈值(用户通过按键/蓝牙设置)
+// 报警阈值参数（可通过按键/蓝牙设置）
 float temp_max   = 38.0f;
 float temp_min   = 35.0f;
 uint8_t heart_max= 120;
@@ -58,7 +58,7 @@ void Alarm_function(void);
 void Bluetooth_Run(uint8_t cmd);
 
 /*******************************************************************
- * 主程序: 系统初始化 + 主循环
+ * 主函数：系统初始化 + 主循环
  ******************************************************************/
 int main(void)
 {
@@ -70,17 +70,17 @@ int main(void)
 	Oled_Clear_All();
 	Usart1_Init(9600);
 	TIM2_Init(99,7199);
-	while(DS18B20_Init() == 1);	// 等待温度传感器初始化成功
-	max30102_init();				// 初始化血氧心率传感器
+	while(DS18B20_Init() == 1);	// 等待体温传感器初始化成功
+	max30102_init();				// 心率血氧传感器初始化
 
 	while(1)
 	{
-		// 读取传感器数据 (每100ms采集一次)
+		// 读取传感器数据
 		temp_value = DS18B20_Get_Temp();
-		heart_rate = get_real_heart_rate();
-		spo2       = get_real_spo2();
+	heart_rate = get_real_spo2();
+		spo2       = get_real_heart_rate();
 
-		// 按键处理 + 数据监控 + 报警检查 + OLED显示
+		// 按流程执行：按键 → 监测 → 报警 → 显示
 		Key_function();
 		Monitor_function();
 		Alarm_function();
@@ -93,14 +93,14 @@ int main(void)
 
 /*******************************************************************
  * 按键处理函数
- * 功能: 模式切换、参数加减、从睡眠唤醒
+ * 功能：模式切换、参数加减、进入/退出设置
  ******************************************************************/
 void Key_function(void)
 {
 	key_num = Chiclet_Keyboard_Scan(0);
 	if(key_num == 0) return;	// 无按键直接返回
 
-	// 睡眠状态下,只KEY3唤醒
+	// 关机状态下，按KEY3开机
 	if(system_state == 2)
 	{
 		if(key_num == 3)
@@ -111,7 +111,7 @@ void Key_function(void)
 		return;
 	}
 
-	// 正常模式下,KEY2切换工作模式(本地/遥控/自动)
+	// 运行模式下，按KEY2切换工作模式：待机→本地→遥控→待机
 	if(system_state == 0 && key_num == 2)
 	{
 		work_mode++;
@@ -120,15 +120,15 @@ void Key_function(void)
 		return;
 	}
 
-	// 遥控模式下,禁止按键操作
+	// 遥控模式下，禁止本地按键操作
 	if(work_mode == 1) return;
 
-	// 设置模式下:KEY1翻页(6页参数),KEY2加,KEY3减
+	// 设置模式下：按键1切页，按键2加，按键3减
 	if(system_state == 1)
 	{
 		switch(key_num)
 		{
-			case 1:	// 切换参数页面,6页参数+1页退出菜单
+			case 1:	// 切换设置项，超过6项退出设置
 				flag_display++;
 				if(flag_display > 6)
 				{
@@ -165,7 +165,7 @@ void Key_function(void)
 		return;
 	}
 
-	// 正常模式下按键操作
+	// 运行模式下按键功能
 	switch(key_num)
 	{
 		case 1:	// 进入设置模式
@@ -174,7 +174,7 @@ void Key_function(void)
 			Oled_Clear_All();
 			break;
 
-		case 3:	// 进入睡眠模式
+		case 3:	// 进入关机模式
 			system_state = 2;
 			Oled_Clear_All();
 			break;
@@ -182,8 +182,8 @@ void Key_function(void)
 }
 
 /*******************************************************************
- * 蓝牙遥控指令执行
- * 仅在遥控模式(work_mode==1)时有效
+ * 蓝牙遥控指令执行函数
+ * 仅在遥控模式(work_mode==1)下生效
  ******************************************************************/
 void Bluetooth_Run(uint8_t cmd)
 {
@@ -197,7 +197,7 @@ void Bluetooth_Run(uint8_t cmd)
 			flag_display = 0;
 			break;
 
-		case 'B':	// 进入/切换参数设置
+		case 'B':	// 进入/切换设置项
 			if(system_state == 0)
 			{
 				system_state = 1;
@@ -249,20 +249,20 @@ void Bluetooth_Run(uint8_t cmd)
 }
 
 /*******************************************************************
- * 数据监测函数
- * 功能: 定时采集、数据判断、报警中断、数据上传
+ * 监测核心函数
+ * 功能：定时采集、报警判断、蓝牙上传、蓝牙指令解析
  ******************************************************************/
 void Monitor_function(void)
 {
-	// 定时采集传感器数据 (周期100ms,不在睡眠模式)
-	if(time_num % 10 == 0 && system_state != 2)
+	// 定时采集传感器数据（非关机模式）
+	if(time_num % 5 == 0 && system_state != 2)
 	{
 		temp_value = DS18B20_Get_Temp();
-		heart_rate = get_real_heart_rate();
-		spo2       = get_real_spo2();
+		heart_rate = get_real_spo2();
+		spo2       = get_real_heart_rate();
 	}
 
-	// 只在正常模式和遥控模式进行报警判断(设置模式不判断、睡眠模式不判断)
+	// 只有运行模式才判断报警，设置模式不判断、不推送
 	if(system_state != 2 && system_state != 1)
 	{
 		float temp_cur = temp_value / 10.0f;
@@ -270,15 +270,15 @@ void Monitor_function(void)
 		_Bool new_alarm_heart = (heart_rate > heart_max || heart_rate < heart_min);
 		_Bool new_alarm_spo2  = (spo2 > spo2_max || spo2 < spo2_min);
 
-		// 本地/遥控模式下异常才上报(自动模式不上报)
+		// 本地/遥控模式：报警推蓝牙；待机模式不推送
 		if(work_mode != 2)
 		{
 			if(new_alarm_temp)
-				UsartPrintf(USART1,"温度报警: %s!\r\n", temp_cur>temp_max ? "温度过高" : "温度过低");
+				UsartPrintf(USART1,"【报警】%s！\r\n", temp_cur>temp_max ? "体温过高" : "体温过低");
 			if(new_alarm_heart)
-				UsartPrintf(USART1,"心率报警: %s!\r\n", heart_rate>heart_max ? "心率过快" : "心率过慢");
+				UsartPrintf(USART1,"【报警】%s！\r\n", heart_rate>heart_max ? "心率过快" : "心率过慢");
 			if(new_alarm_spo2)
-				UsartPrintf(USART1,"血氧报警: %s!\r\n", spo2>spo2_max ? "血氧过高" : "血氧过低");
+				UsartPrintf(USART1,"【报警】%s！\r\n", spo2>spo2_max ? "血氧过高" : "血氧过低");
 		}
 
 		// 更新报警标志
@@ -287,37 +287,37 @@ void Monitor_function(void)
 		alarm_spo2  = new_alarm_spo2;
 	}
 
-	// 定时数据上传(周期300ms)
-	if(time_num % 30 == 0 && system_state != 2)
+	// 定时蓝牙上传数据
+	if(time_num % 10 == 0 && system_state != 2)
 	{
-		if(system_state == 1)	// 设置模式上报当前设置值
+		if(system_state == 1)	// 设置界面上传阈值
 		{
 			switch(flag_display)
 			{
-				case 1: UsartPrintf(USART1,"[设置] 温度上限: %.1f\r\n", temp_max);  break;
-				case 2: UsartPrintf(USART1,"[设置] 温度下限: %.1f\r\n", temp_min);  break;
+				case 1: UsartPrintf(USART1,"[设置] 体温上限: %.1f\r\n", temp_max);  break;
+				case 2: UsartPrintf(USART1,"[设置] 体温下限: %.1f\r\n", temp_min);  break;
 				case 3: UsartPrintf(USART1,"[设置] 心率上限: %d\r\n", heart_max); break;
 				case 4: UsartPrintf(USART1,"[设置] 心率下限: %d\r\n", heart_min); break;
 				case 5: UsartPrintf(USART1,"[设置] 血氧上限: %d\r\n", spo2_max);  break;
 				case 6: UsartPrintf(USART1,"[设置] 血氧下限: %d\r\n", spo2_min);  break;
-				default:UsartPrintf(USART1,"[设置] 请选择参数...\r\n");               break;
+				default:UsartPrintf(USART1,"[设置] 等待选择...\r\n");               break;
 			}
 		}
-		else	// 正常模式上报实时数据
+		else	// 运行界面上传实时数据
 		{
-			UsartPrintf(USART1,"温度:%d.%d\r\n", temp_value/10, temp_value%10);
-			UsartPrintf(USART1,"心率:%d\r\n", heart_rate);
-			UsartPrintf(USART1,"血氧:%d\r\n", spo2);
+			UsartPrintf(USART1,"体温:%d.%d\r\n", temp_value/10, temp_value%10);
+			UsartPrintf(USART1,"血氧:%d\r\n", heart_rate);
+			UsartPrintf(USART1,"心率:%d\r\n", spo2);
 			if(work_mode == 0)      UsartPrintf(USART1,"模式:本地\r\n");
 			else if(work_mode == 1) UsartPrintf(USART1,"模式:遥控\r\n");
-			else                    UsartPrintf(USART1,"模式:自动\r\n");
+			else                    UsartPrintf(USART1,"模式:待机\r\n");
 		}
 	}
 
-	// 处理来自串口的指令
+	// 蓝牙指令接收处理
 	if(USART1_WaitRecive() == 0)
 	{
-		// 指令A: 切换工作模式
+		// 指令A：切换模式
 		if(strstr((char*)usart1_buf,"A"))
 		{
 			work_mode++;
@@ -326,7 +326,7 @@ void Monitor_function(void)
 			flag_display = 0;
 			Oled_Clear_All();
 		}
-		// 指令E: 切换睡眠状态
+		// 指令E：开关机
 		if(strstr((char*)usart1_buf,"E"))
 		{
 			if(system_state == 2)
@@ -346,46 +346,46 @@ void Monitor_function(void)
 				alarm_temp=alarm_heart=alarm_spo2=0;
 			}
 		}
-		// 遥控模式下执行B/C/D指令
+		// 遥控模式下解析B/C/D指令
 		if(work_mode == 1)
 		{
 			if(strstr((char*)usart1_buf,"B")) Bluetooth_Run('B');
 			if(strstr((char*)usart1_buf,"C")) Bluetooth_Run('C');
 			if(strstr((char*)usart1_buf,"D")) Bluetooth_Run('D');
 		}
-		USART1_Clear();	// 清空串口缓冲区
+		USART1_Clear();	// 清空接收缓存
 	}
 }
 
 /*******************************************************************
  * 报警控制函数
- * 功能: 控制蜂鸣器、指示灯LED
- * 本地/遥控/睡眠模式逻辑控制
+ * 功能：控制蜂鸣器BEEP、指示灯LED
+ * 待机/设置/关机：不报警
  ******************************************************************/
 void Alarm_function(void)
 {
-	if(system_state == 2)	// 睡眠模式全部静音
+	if(system_state == 2)	// 关机：全关
 	{
 		BEEP = 0;
 		LED  = 0;
 		return;
 	}
 
-	if(system_state != 0)	// 设置模式不报警
+	if(system_state != 0)	// 设置模式：不报警
 	{
 		BEEP = 0;
 		LED  = 0;
 		return;
 	}
 
-	if(work_mode == 2)		// 自动模式只点亮LED
+	if(work_mode == 2)		// 待机模式：不报警
 	{
 		BEEP = 0;
 		LED  = 1;
 		return;
 	}
 
-	// 本地/遥控模式: 异常则报警
+	// 运行模式：异常报警
 	if(alarm_temp || alarm_heart || alarm_spo2)
 	{
 		BEEP = 1;
@@ -400,7 +400,7 @@ void Alarm_function(void)
 
 /*******************************************************************
  * OLED显示函数
- * 根据不同模式、状态自动切换显示页面
+ * 根据不同模式、状态自动切换界面
  ******************************************************************/
 void Display_function(void)
 {
@@ -409,21 +409,21 @@ void Display_function(void)
 	static uint8_t last_set_page = 0xFF;
 	static uint8_t last_sys_state= 0xFF;
 
-	if(system_state == 2)	// 睡眠模式显示
+	if(system_state == 2)	// 关机界面
 	{
 		if(last_sys_state != 2)
 		{
 			Oled_Clear_All();
 			last_sys_state = 2;
 		}
-		Oled_ShowCHinese(2,3,"睡眠");
+		Oled_ShowCHinese(2,3,"关机");
 		last_alarm_state = 0;
 		last_set_page = 0xFF;
 		return;
 	}
 	last_sys_state = system_state;
 
-	if(system_state == 1)	// 设置页面显示
+	if(system_state == 1)	// 设置界面
 	{
 		if(flag_display != last_set_page)
 		{
@@ -434,12 +434,12 @@ void Display_function(void)
 		switch(flag_display)
 		{
 			case 1:
-				Oled_ShowCHinese(1,0,"温度上限");
+				Oled_ShowCHinese(1,0,"体温上限");
 				sprintf(display_buf,"%.1f",temp_max);
 				Oled_ShowString(2,8,display_buf);
 				break;
 			case 2:
-				Oled_ShowCHinese(1,0,"温度下限");
+				Oled_ShowCHinese(1,0,"体温下限");
 				sprintf(display_buf,"%.1f",temp_min);
 				Oled_ShowString(2,8,display_buf);
 				break;
@@ -469,7 +469,7 @@ void Display_function(void)
 	}
 	last_set_page = 0xFF;
 
-	// 自动模式: 仅显示数据,不显示报警
+	// 待机界面：只显示数据，不显示报警
 	if(work_mode == 2)
 	{
 		if(normal_first)
@@ -479,21 +479,21 @@ void Display_function(void)
 		}
 		sprintf(display_buf,"%d.%dC   ",temp_value/10,temp_value%10);
 		Oled_ShowString(1,6,display_buf);
-		Oled_ShowCHinese(1,0,"温度: ");
+		Oled_ShowCHinese(1,0,"体温：");
 
 		sprintf(display_buf,"%d    ",heart_rate);
 		Oled_ShowString(2,6,display_buf);
-		Oled_ShowCHinese(2,0,"心率: ");
+		Oled_ShowCHinese(2,0,"心率：");
 
 		sprintf(display_buf,"%d    ",spo2);
 		Oled_ShowString(3,6,display_buf);
-		Oled_ShowCHinese(3,0,"血氧: ");
+		Oled_ShowCHinese(3,0,"血氧：");
 
-		Oled_ShowCHinese(4,0,"模式:自动");
+		Oled_ShowCHinese(4,0,"模式：待机");
 		return;
 	}
 
-	// 本地/遥控: 异常时显示异常信息
+	// 本地/遥控：报警界面
 	if(current_alarm != last_alarm_state)
 	{
 		Oled_Clear_All();
@@ -502,8 +502,8 @@ void Display_function(void)
 
 	if(current_alarm)
 	{
-		if(temp_value/10.0f > temp_max)      Oled_ShowCHinese(1,0,"温度过高");
-		else if(temp_value/10.0f < temp_min) Oled_ShowCHinese(1,0,"温度过低");
+		if(temp_value/10.0f > temp_max)      Oled_ShowCHinese(1,0,"体温过高");
+		else if(temp_value/10.0f < temp_min) Oled_ShowCHinese(1,0,"体温过低");
 		else Oled_ShowCHinese(1,0,"        ");
 
 		if(heart_rate > heart_max)           Oled_ShowCHinese(2,0,"心率过快");
@@ -516,7 +516,7 @@ void Display_function(void)
 		return;
 	}
 
-	// 正常数据显示页面
+	// 正常数据界面
 	if(normal_first)
 	{
 		Oled_Clear_All();
@@ -525,18 +525,18 @@ void Display_function(void)
 
 	sprintf(display_buf,"%d.%dC   ",temp_value/10,temp_value%10);
 	Oled_ShowString(1,6,display_buf);
-	Oled_ShowCHinese(1,0,"温度: ");
+	Oled_ShowCHinese(1,0,"体温：");
 
 	sprintf(display_buf,"%d    ",heart_rate);
 	Oled_ShowString(2,6,display_buf);
-	Oled_ShowCHinese(2,0,"心率: ");
+	Oled_ShowCHinese(2,0,"心率：");
 
 	sprintf(display_buf,"%d    ",spo2);
 	Oled_ShowString(3,6,display_buf);
-	Oled_ShowCHinese(3,0,"血氧: ");
+	Oled_ShowCHinese(3,0,"血氧：");
 
 	if(work_mode == 0)
-		Oled_ShowCHinese(4,0,"模式:本地");
+		Oled_ShowCHinese(4,0,"模式：本地");
 	else if(work_mode == 1)
-		Oled_ShowCHinese(4,0,"模式:遥控");
+		Oled_ShowCHinese(4,0,"模式：遥控");
 }
