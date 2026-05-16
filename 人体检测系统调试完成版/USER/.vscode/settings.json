@@ -1,0 +1,14 @@
+{
+  "files.associations": {
+    "*.cjson": "jsonc",
+    "*.wxss": "css",
+    "*.wxs": "javascript",
+    "gpio.h": "c",
+    "key.h": "c",
+    "oled.h": "c",
+    "adc.h": "c",
+    "oled_tab.h": "c",
+    "motor_bujin.h": "c",
+    "ds18b20.h": "c"
+  }
+}
