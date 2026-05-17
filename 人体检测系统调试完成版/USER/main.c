@@ -77,8 +77,8 @@ int main(void)
 	{
 		// 读取传感器数据
 		temp_value = DS18B20_Get_Temp();
-	heart_rate = get_real_spo2();
-		spo2       = get_real_heart_rate();
+		heart_rate = get_real_heart_rate();
+		spo2       = get_real_spo2();
 
 		// 按流程执行：按键 → 监测 → 报警 → 显示
 		Key_function();
@@ -258,8 +258,8 @@ void Monitor_function(void)
 	if(time_num % 5 == 0 && system_state != 2)
 	{
 		temp_value = DS18B20_Get_Temp();
-		heart_rate = get_real_spo2();
-		spo2       = get_real_heart_rate();
+		heart_rate = get_real_heart_rate();
+		spo2       = get_real_spo2();
 	}
 
 	// 只有运行模式才判断报警，设置模式不判断、不推送
@@ -288,7 +288,7 @@ void Monitor_function(void)
 	}
 
 	// 定时蓝牙上传数据
-	if(time_num % 10 == 0 && system_state != 2)
+	if(time_num % 2 == 0 && system_state != 2)
 	{
 		if(system_state == 1)	// 设置界面上传阈值
 		{
@@ -408,6 +408,11 @@ void Display_function(void)
 	static uint8_t normal_first = 1;
 	static uint8_t last_set_page = 0xFF;
 	static uint8_t last_sys_state= 0xFF;
+	static uint8_t last_work_mode = 0xFF;
+	uint8_t sys_changed;
+	uint8_t alarm_changed;
+	uint8_t page_changed;
+	uint8_t draw_lbl;
 
 	if(system_state == 2)	// 关机界面
 	{
@@ -421,11 +426,14 @@ void Display_function(void)
 		last_set_page = 0xFF;
 		return;
 	}
+	sys_changed   = (last_sys_state != system_state);
+	alarm_changed = (current_alarm != last_alarm_state);
 	last_sys_state = system_state;
 
 	if(system_state == 1)	// 设置界面
 	{
-		if(flag_display != last_set_page)
+		page_changed = (flag_display != last_set_page);
+		if(page_changed)
 		{
 			Oled_Clear_All();
 			last_set_page = flag_display;
@@ -434,32 +442,32 @@ void Display_function(void)
 		switch(flag_display)
 		{
 			case 1:
-				Oled_ShowCHinese(1,0,"体温上限");
+				if(page_changed) Oled_ShowCHinese(1,0,"体温上限");
 				sprintf(display_buf,"%.1f",temp_max);
 				Oled_ShowString(2,8,display_buf);
 				break;
 			case 2:
-				Oled_ShowCHinese(1,0,"体温下限");
+				if(page_changed) Oled_ShowCHinese(1,0,"体温下限");
 				sprintf(display_buf,"%.1f",temp_min);
 				Oled_ShowString(2,8,display_buf);
 				break;
 			case 3:
-				Oled_ShowCHinese(1,0,"心率上限");
+				if(page_changed) Oled_ShowCHinese(1,0,"心率上限");
 				sprintf(display_buf,"%03d",heart_max);
 				Oled_ShowString(2,8,display_buf);
 				break;
 			case 4:
-				Oled_ShowCHinese(1,0,"心率下限");
+				if(page_changed) Oled_ShowCHinese(1,0,"心率下限");
 				sprintf(display_buf,"%03d",heart_min);
 				Oled_ShowString(2,8,display_buf);
 				break;
 			case 5:
-				Oled_ShowCHinese(1,0,"血氧上限");
+				if(page_changed) Oled_ShowCHinese(1,0,"血氧上限");
 				sprintf(display_buf,"%03d",spo2_max);
 				Oled_ShowString(2,8,display_buf);
 				break;
 			case 6:
-				Oled_ShowCHinese(1,0,"血氧下限");
+				if(page_changed) Oled_ShowCHinese(1,0,"血氧下限");
 				sprintf(display_buf,"%03d",spo2_min);
 				Oled_ShowString(2,8,display_buf);
 				break;
@@ -472,24 +480,26 @@ void Display_function(void)
 	// 待机界面：只显示数据，不显示报警
 	if(work_mode == 2)
 	{
+		draw_lbl = normal_first || (last_work_mode != work_mode) || sys_changed || alarm_changed;
 		if(normal_first)
 		{
 			Oled_Clear_All();
 			normal_first = 0;
 		}
+		last_work_mode = work_mode;
 		sprintf(display_buf,"%d.%dC   ",temp_value/10,temp_value%10);
 		Oled_ShowString(1,6,display_buf);
-		Oled_ShowCHinese(1,0,"体温：");
+		if(draw_lbl) Oled_ShowCHinese(1,0,"体温：");
 
 		sprintf(display_buf,"%d    ",heart_rate);
 		Oled_ShowString(2,6,display_buf);
-		Oled_ShowCHinese(2,0,"心率：");
+		if(draw_lbl) Oled_ShowCHinese(2,0,"心率：");
 
 		sprintf(display_buf,"%d    ",spo2);
 		Oled_ShowString(3,6,display_buf);
-		Oled_ShowCHinese(3,0,"血氧：");
+		if(draw_lbl) Oled_ShowCHinese(3,0,"血氧：");
 
-		Oled_ShowCHinese(4,0,"模式：待机");
+		if(draw_lbl) Oled_ShowCHinese(4,0,"模式：待机");
 		return;
 	}
 
@@ -517,26 +527,31 @@ void Display_function(void)
 	}
 
 	// 正常数据界面
+	draw_lbl = normal_first || (last_work_mode != work_mode) || sys_changed || alarm_changed;
 	if(normal_first)
 	{
 		Oled_Clear_All();
 		normal_first = 0;
 	}
+	last_work_mode = work_mode;
 
 	sprintf(display_buf,"%d.%dC   ",temp_value/10,temp_value%10);
 	Oled_ShowString(1,6,display_buf);
-	Oled_ShowCHinese(1,0,"体温：");
+	if(draw_lbl) Oled_ShowCHinese(1,0,"体温：");
 
 	sprintf(display_buf,"%d    ",heart_rate);
 	Oled_ShowString(2,6,display_buf);
-	Oled_ShowCHinese(2,0,"心率：");
+	if(draw_lbl) Oled_ShowCHinese(2,0,"心率：");
 
 	sprintf(display_buf,"%d    ",spo2);
 	Oled_ShowString(3,6,display_buf);
-	Oled_ShowCHinese(3,0,"血氧：");
+	if(draw_lbl) Oled_ShowCHinese(3,0,"血氧：");
 
-	if(work_mode == 0)
-		Oled_ShowCHinese(4,0,"模式：本地");
-	else if(work_mode == 1)
-		Oled_ShowCHinese(4,0,"模式：遥控");
+	if(draw_lbl)
+	{
+		if(work_mode == 0)
+			Oled_ShowCHinese(4,0,"模式：本地");
+		else if(work_mode == 1)
+			Oled_ShowCHinese(4,0,"模式：遥控");
+	}
 }

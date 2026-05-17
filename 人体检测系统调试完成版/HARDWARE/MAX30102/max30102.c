@@ -201,9 +201,9 @@ void max30102_init(void)
 	MAX30102_WriteOneByte(FIFO_OV_COUNTER, 0x00);
 	MAX30102_WriteOneByte(FIFO_RD_POINTER, 0x00);
 	
-	MAX30102_WriteOneByte(FIFO_CONFIGURATION, 0x5F);
+	MAX30102_WriteOneByte(FIFO_CONFIGURATION, 0x5F);  /* sample avg=4 (->25Hz net), rollover ON, almost-full=17 */
 	MAX30102_WriteOneByte(MODE_CONFIGURATION, 0x03);
-	MAX30102_WriteOneByte(SPO2_CONFIGURATION, 0x27);
+	MAX30102_WriteOneByte(SPO2_CONFIGURATION, 0x47);  /* ADC range 8192nA, 100Hz, 411us pulse */
 	
 	MAX30102_WriteOneByte(LED1_PULSE_AMPLITUDE, 0x24);
 	MAX30102_WriteOneByte(LED2_PULSE_AMPLITUDE, 0x24);
@@ -213,45 +213,31 @@ void max30102_init(void)
 }
 
 /* =====================================================================
- * MAX30102 real heart-rate / SpO2 measurement
+ * MAX30102 心率 / 血氧 测量层（基于 Maxim 官方算法）
  * ---------------------------------------------------------------------
- *  Sensor mode : SPO2 mode, 100 Hz, FIFO record = 6 bytes (RED then IR)
- *  Buffer      : 200-sample (2 s) ring buffer of RED and IR
- *  Recompute   : every 25 new samples (~250 ms) once buffer is full
- *  Heart rate  : adaptive threshold peak detect on IR
- *                BPM = 60 * Fs * (peaks - 1) / span
- *  SpO2        : R = (AC_red / DC_red) / (AC_ir / DC_ir)
- *                SpO2 = -45.060*R^2 + 30.354*R + 94.845  (Maxim fit)
- *  Finger gate : returns 0 when DC too low / AC too small / saturated
- *
- *  >>> NOTE on function names <<<
- *  main.c assigns the values like this:
- *      heart_rate = get_real_spo2();
- *      spo2       = get_real_heart_rate();
- *  i.e. the two call sites are SWAPPED.  Per project decision main.c is
- *  not modified.  To produce correct readings the two getters below are
- *  deliberately wired the opposite way: get_real_spo2() returns the
- *  real heart rate, get_real_heart_rate() returns the real SpO2.
- *  If main.c is ever fixed, swap the two return statements back.
+ *  采样率   : SPO2 模式 100Hz 物理 + FIFO 4x 平均 = 25Hz 净输出
+ *  缓冲     : 125 样本（5 秒）IR + RED 滑动窗
+ *  计算节奏 : 缓冲首次填满 → 立即算一次；之后每读到 25 个新样本（1秒）
+ *             滑窗推进一格、保留最近 5 秒数据，
+ *             调用 maxim_heart_rate_and_oxygen_saturation 重新计算。
+ *  接口     : main.c 周期性调用 max30102_update()，然后通过
+ *             get_real_heart_rate() / get_real_spo2() 取最新有效值。
+ *             检测不到手指或信号无效时返回 0。
  * ===================================================================== */
 
-#define MAX30102_BUF_SIZE    100
-#define COMPUTE_INTERVAL     25
-#define MIN_PEAK_GAP         6 
-#define FINGER_IR_DC_MIN     1000UL 
-#define FINGER_RED_DC_MIN    500UL 
-#define FINGER_AC_MIN        10UL 
-#define IR_SATURATION_LIMIT  0x03FFF0UL
+#include "algorithm.h"
 
-static uint32_t ir_buf[MAX30102_BUF_SIZE];
-static uint32_t red_buf[MAX30102_BUF_SIZE];
-static uint16_t buf_head = 0;
-static uint16_t buf_count = 0;
-static uint16_t samples_since_compute = 0;
-static uint8_t  real_hr = 0;
+#define MAX30102_WIN_LEN     BUFFER_SIZE        /* 125 = 5秒 @ 25Hz */
+#define MAX30102_REFRESH     FS                 /* 每 25 样本(=1秒) 重算 */
+
+static uint32_t aun_ir_buf [MAX30102_WIN_LEN];
+static uint32_t aun_red_buf[MAX30102_WIN_LEN];
+static uint16_t buf_count            = 0;       /* 已积累样本数（0..WIN_LEN） */
+static uint16_t samples_since_compute = 0;       /* 距离上次计算的新样本数 */
+static uint8_t  real_hr   = 0;
 static uint8_t  real_spo2 = 0;
 
-/* Read one full FIFO record: RED first (3 bytes), then IR (3 bytes). */
+/* 读取一组 FIFO 数据：RED 在前 3 字节，IR 在后 3 字节 */
 static void max30102_read_one_sample(uint32_t *red, uint32_t *ir)
 {
     uint8_t b[6];
@@ -260,7 +246,7 @@ static void max30102_read_one_sample(uint32_t *red, uint32_t *ir)
     *ir  = (((uint32_t)b[3] << 16) | ((uint32_t)b[4] << 8) | b[5]) & 0x03FFFF;
 }
 
-/* Number of samples available in FIFO (write ptr - read ptr, mod 32). */
+/* 当前 FIFO 中待读样本数（写指针 - 读指针, mod 32） */
 static uint8_t max30102_fifo_pending(void)
 {
     uint8_t wr = MAX30102_ReadOneByte(FIFO_WR_POINTER);
@@ -268,128 +254,90 @@ static uint8_t max30102_fifo_pending(void)
     return (uint8_t)((wr - rd) & 0x1F);
 }
 
-/* Walk the ring buffer in time order and compute HR + SpO2. */
+/* 调用 Maxim 算法对当前窗口计算心率 / SpO2，写入 real_hr / real_spo2 */
 static void compute_hr_and_spo2(void)
 {
-    uint16_t i;
-    uint32_t ir_max = 0, ir_min = 0x03FFFF;
-    uint32_t red_max = 0, red_min = 0x03FFFF;
-    uint32_t ir_sum = 0, red_sum = 0;
-    uint32_t ir_mean, red_mean, ir_ac, red_ac;
-    uint32_t threshold;
-    uint16_t peak_count = 0;
-    uint16_t first_peak = 0, last_peak = 0, last_peak_idx = 0;
-    uint8_t  above = 0;
-    float    r, spo2_val;
+    int32_t n_hr  = 0, n_spo2 = 0;
+    int8_t  ch_hr_valid = 0, ch_spo2_valid = 0;
 
-    for(i = 0; i < MAX30102_BUF_SIZE; i++)
-    {
-        uint16_t idx = (uint16_t)((buf_head + i) % MAX30102_BUF_SIZE);
-        uint32_t ir  = ir_buf[idx];
-        uint32_t red = red_buf[idx];
-        if(ir  > ir_max)  ir_max  = ir;
-        if(ir  < ir_min)  ir_min  = ir;
-        if(red > red_max) red_max = red;
-        if(red < red_min) red_min = red;
-        ir_sum  += ir;
-        red_sum += red;
-    }
+    maxim_heart_rate_and_oxygen_saturation(
+        aun_ir_buf, MAX30102_WIN_LEN, aun_red_buf,
+        &n_spo2, &ch_spo2_valid,
+        &n_hr , &ch_hr_valid);
 
-    ir_mean  = ir_sum  / MAX30102_BUF_SIZE;
-    red_mean = red_sum / MAX30102_BUF_SIZE;
-    ir_ac    = ir_max  - ir_min;
-    red_ac   = red_max - red_min;
+    /* 心率有效范围 30..220 bpm */
+    if(ch_hr_valid && n_hr >= 30 && n_hr <= 220)
+        real_hr = (uint8_t)n_hr;
+    else
+        real_hr = 0;
 
-    /* Finger / signal sanity check. */
-    if(ir_mean  < FINGER_IR_DC_MIN  ||
-       red_mean < FINGER_RED_DC_MIN ||
-       ir_ac    < FINGER_AC_MIN     ||
-       ir_max   >= IR_SATURATION_LIMIT)
-    {
-        real_hr   = 0;
+    /* 血氧有效范围 70..100 % */
+    if(ch_spo2_valid && n_spo2 >= 70 && n_spo2 <= 100)
+        real_spo2 = (uint8_t)n_spo2;
+    else
         real_spo2 = 0;
-        return;
-    }
-
-    /* Heart rate: threshold = mean + AC/4 ; require min spacing between peaks. */
-    threshold = ir_mean + (ir_ac >> 2);
-    for(i = 0; i < MAX30102_BUF_SIZE; i++)
-    {
-        uint16_t idx = (uint16_t)((buf_head + i) % MAX30102_BUF_SIZE);
-        uint32_t ir  = ir_buf[idx];
-
-        if(ir > threshold)
-        {
-            if(!above && (peak_count == 0 || (i - last_peak_idx) >= MIN_PEAK_GAP))
-            {
-                above = 1;
-                if(peak_count == 0) first_peak = i;
-                last_peak = i;
-                last_peak_idx = i;
-                peak_count++;
-            }
-        }
-        else if(ir < ir_mean)
-        {
-            above = 0;
-        }
-    }
-
-    if(peak_count >= 2)
-    {
-        uint32_t span = (uint32_t)(last_peak - first_peak);
-        uint32_t bpm  = (1500UL * (uint32_t)(peak_count - 1)) / span;
-        if(bpm >= 40 && bpm <= 200)
-            real_hr = (uint8_t)bpm;
-    }
-
-    /* SpO2: AC/DC ratio with Maxim empirical curve. */
-    if(red_ac > 0 && ir_ac > 0)
-    {
-        r        = ((float)red_ac * (float)ir_mean) / ((float)red_mean * (float)ir_ac);
-        spo2_val = -45.060f * r * r + 30.354f * r + 94.845f;
-        if(spo2_val > 100.0f) spo2_val = 100.0f;
-        if(spo2_val >= 50.0f) real_spo2 = (uint8_t)spo2_val;
-    }
 }
 
-/* Call at any rate from main loop; safe to call multiple times per loop. */
+/* 把 FIFO 中所有 pending 样本搬入滑动窗，并按节奏触发计算。
+ * 主循环只需周期性调用此函数即可。 */
 void max30102_update(void)
 {
-    uint8_t avail = max30102_fifo_pending();
+    uint8_t avail;
+    uint32_t red, ir;
+    uint16_t i;
+
+    avail = max30102_fifo_pending();
     while(avail-- > 0)
     {
-        uint32_t red, ir;
         max30102_read_one_sample(&red, &ir);
-        ir_buf[buf_head]  = ir;
-        red_buf[buf_head] = red;
-        buf_head = (uint16_t)((buf_head + 1) % MAX30102_BUF_SIZE);
-        if(buf_count < MAX30102_BUF_SIZE) buf_count++;
+
+        if(buf_count < MAX30102_WIN_LEN)
+        {
+            /* 窗未满，追加到末尾 */
+            aun_red_buf[buf_count] = red;
+            aun_ir_buf [buf_count] = ir;
+            buf_count++;
+        }
+        else
+        {
+            /* 窗已满：丢弃最旧一个，整体左移一格，新样本放到末尾。
+             * 与参考程序"批量丢弃前 100、保留后 400、再补 100"等价，
+             * 只是每个新样本来时就移一次，逻辑更简单。
+             * 移动开销在 100Hz 下完全可承受。 */
+            for(i = 0; i < MAX30102_WIN_LEN - 1; i++)
+            {
+                aun_red_buf[i] = aun_red_buf[i + 1];
+                aun_ir_buf [i] = aun_ir_buf [i + 1];
+            }
+            aun_red_buf[MAX30102_WIN_LEN - 1] = red;
+            aun_ir_buf [MAX30102_WIN_LEN - 1] = ir;
+        }
+
         samples_since_compute++;
     }
 
-    if(buf_count >= MAX30102_BUF_SIZE && samples_since_compute >= COMPUTE_INTERVAL)
+    /* 缓冲填满后，每 MAX30102_REFRESH (=25) 个新样本重新算一次 */
+    if(buf_count >= MAX30102_WIN_LEN && samples_since_compute >= MAX30102_REFRESH)
     {
         compute_hr_and_spo2();
         samples_since_compute = 0;
     }
 }
 
-/* main.c bug: heart_rate = get_real_spo2();  -> we return REAL HR here. */
-uint8_t get_real_spo2(void)
+/* main.c 中的赋值已经修正为正向，此处按名称返回正确值 */
+uint8_t get_real_heart_rate(void)
 {
     max30102_update();
     return real_hr;
 }
 
-/* main.c bug: spo2 = get_real_heart_rate();  -> we return REAL SpO2 here. */
-uint8_t get_real_heart_rate(void)
+uint8_t get_real_spo2(void)
 {
     max30102_update();
     return real_spo2;
 }
 
-/* Legacy helpers kept for ABI compatibility. */
+/* ----- 旧接口保留，供其它模块兼容 ----- */
 uint32_t max30102_get_ir(void)
 {
     uint8_t buf[6];

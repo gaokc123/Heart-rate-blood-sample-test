@@ -31,3 +31,4 @@
 ..\obj\max30102.o: ..\STM32F10x_FWLib\inc\stm32f10x_wwdg.h
 ..\obj\max30102.o: ..\STM32F10x_FWLib\inc\misc.h
 ..\obj\max30102.o: ..\SYSTEM\delay\delay.h
+..\obj\max30102.o: ..\HARDWARE\MAX30102\algorithm.h

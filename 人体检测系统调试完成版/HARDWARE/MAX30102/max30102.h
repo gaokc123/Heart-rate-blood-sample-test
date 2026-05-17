@@ -61,10 +61,10 @@ void max30102_init(void);
 void max30102_fifo_read(uint32_t *data);
 uint8_t MAX30102_ReadOneByte(uint8_t ReadAddr);
 
-/* ----- real heart-rate / SpO2 measurement (added) ----- */
-void    max30102_update(void);          /* call from main loop; pulls FIFO, recomputes when due */
-uint8_t get_real_heart_rate(void);      /* note: wired to return SpO2 to compensate main.c swap */
-uint8_t get_real_spo2(void);            /* note: wired to return heart rate to compensate main.c swap */
+/* ----- 实时心率 / 血氧测量（Maxim 官方算法） ----- */
+void    max30102_update(void);          /* 主循环周期性调用：搬运 FIFO、到点重算 */
+uint8_t get_real_heart_rate(void);      /* 返回最新有效心率 (bpm)，无效时返回 0 */
+uint8_t get_real_spo2(void);            /* 返回最新有效血氧 (%)，无效时返回 0 */
 uint32_t max30102_get_ir(void);
 //IIC所有操作函数
 //void IIC_Init(void);                //初始化IIC的IO口				 
